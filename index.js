@@ -56,7 +56,30 @@ async function run() {
 
   // Helper to acquire a lock
   async function acquire(resourceId) {
-    const query = { _id: resourceId, expiresAt: { $gt: new Date() } };
+    // In order to defend against deadlocks, give up after a certain number of tries
+    const NUM_RETRIES = 3;
+
+    for (let i = 0; i < NUM_RETRIES; ++i) {
+      // 1. Try to acquire the lock
+      const res = await _acquire(resourceId);
+
+      // 2. If you successfully acquired the lock, return the lock document
+      if (!res.lastErrorObject.updatedExisting) {
+        return res.value;
+      }
+      
+      // 3. If not, `waitUntil()` the existing lock's `expiresAt`
+      const existingLock = res.value;
+      await waitUntil(existingLock.expiresAt);
+    }
+    
+    // 4. Repeat 1-3 until you've run out of retries
+    throw new StandardError('Conflict!', { status: 409 });
+  }
+
+  // Helper to try to acquire the lock
+  async function _acquire(resourceId) {
+    const query = { _id: resourceId };
     // Make the lock expire in case we forget to release it
     const update = {
       $setOnInsert: { expiresAt: new Date(Date.now() + 1000) }
@@ -66,21 +89,18 @@ async function run() {
       returnOriginal: false
     });
 
-    // If there was already a document with the given id, throw an error
-    // with HTTP status 409 (Conflict)
-    if (res.lastErrorObject.updatedExisting) {
-      throw new StandardError('Conflict!', { status: 409 });
-    }
-
-    // If the lock was acquired successfully, return the document representing
-    // the lock
-    return res.value;
+    return res;
   }
 
   // Helper to release a lock
   async function release(lock) {
     await db.collection('Lock').deleteOne({ _id: lock._id });
   }
+}
+
+async function waitUntil(time) {
+  // Given a Date `time`, wait until `time`
+  await new Promise(resolve => setTimeout(() => resolve(), time.valueOf() - Date.now()));
 }
 
 // Convenience helper for async/await with Express
