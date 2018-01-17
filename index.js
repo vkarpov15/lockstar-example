@@ -1,5 +1,5 @@
 const Archetype = require('archetype');
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
 const StandardError = require('standard-error');
 const bodyParser = require('body-parser');
 const express = require('express');
@@ -46,6 +46,36 @@ async function run() {
     }
     console.log(new Date(), `Inserting ${user.email}`);
     await db.collection('User').insertOne(user);
+    console.log(new Date(), `Inserted ${user.email}`);
+    // Release the lock now that the critical section is done
+    await release(lock);
+    return { user };
+  }));
+
+  // Take the `UserType` and add an `_id` to it
+  const UserUpdateType = UserType.
+    path('_id', { $type: ObjectId, $required: true }).
+    compile('UserUpdateType');
+
+  app.put('/user', wrap(async function register(req) {
+    const user = new UserUpdateType(req.body);
+    user.email = user.email.toLowerCase();
+
+    const lock = await acquire(`user:email:${user.email}`);
+
+    // Search for existing user unless email ends with given string
+    if (!user.email.endsWith('@mycompany.com')) {
+      console.log(new Date(), `Checking ${user.email}`);
+      const existingUser = await db.collection('User').findOne({ email: user.email });
+      console.log(new Date(), `Checked ${user.email}`);
+      if (existingUser != null) { 
+        // Make sure to release the lock before ending this function
+        await release(lock); 
+        throw new StandardError(`User already exists with email ${user.email}`, { status: 400 });
+      }
+    }
+    console.log(new Date(), `Inserting ${user.email}`);
+    await db.collection('User').updateOne({ _id: user._id }, { $set: user });
     console.log(new Date(), `Inserted ${user.email}`);
     // Release the lock now that the critical section is done
     await release(lock);
